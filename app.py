@@ -2,6 +2,8 @@ import os
 import streamlit as st
 import pandas as pd
 from dotenv import load_dotenv
+import time
+from google.genai.errors import ServerError
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 
@@ -90,9 +92,10 @@ Puedo ayudarte con:
 # ==================================================
 
 llm = ChatGoogleGenerativeAI(
-    model="gemini-flash-latest",
+    model="gemini-2.5-flash",
     google_api_key=GOOGLE_API_KEY,
-    temperature=0
+    temperature=0,
+    max_retries=5,
 )
 
 embeddings = HuggingFaceEmbeddings(
@@ -152,8 +155,9 @@ Tono de base: {fila['TONO BASE']}
     chunks = splitter.split_documents(documentos)
 
     return Chroma.from_documents(
-        chunks,
-        embeddings
+        documents=chunks,
+        embedding=embeddings,
+        persist_directory="db"
     )
 
 vector_db = cargar_base()
@@ -195,9 +199,6 @@ Pregunta:
 )
 ])
 
-if "historial" not in st.session_state:
-    st.session_state.historial = []
-
 # ==================================================
 # FUNCIÓN
 # ==================================================
@@ -211,7 +212,10 @@ def responder(pregunta):
         for doc in documentos
     )
 
-    historial = "\n".join(st.session_state.historial)
+    historial = "\n".join(
+        f"{rol}: {mensaje}"
+        for rol, mensaje in st.session_state.history
+    )
 
     mensajes = prompt.invoke({
 
@@ -221,7 +225,19 @@ def responder(pregunta):
 
     })
 
-    respuesta = llm.invoke(mensajes)
+    for intento in range(5):
+
+        try:
+
+            respuesta = llm.invoke(mensajes)
+            break
+
+        except ServerError:
+
+            if intento == 4:
+                return "⚠️ Gemini está temporalmente saturado. Intenta nuevamente en unos segundos."
+
+            time.sleep(2 ** intento)
 
     if isinstance(respuesta.content, list):
         texto = ""
@@ -252,8 +268,14 @@ if pregunta:
         ("user",pregunta)
     )
 
-    with st.spinner("💄 Buscando la mejor respuesta para ti..."):
-        respuesta = responder(pregunta)
+    with st.spinner("Buscando la mejor respuesta para ti..."):
+
+        try:
+            respuesta = responder(pregunta)
+
+        except Exception as e:
+            st.error(str(e))
+            respuesta = "No fue posible generar una respuesta."
 
     st.session_state.history.append(
         ("assistant",respuesta)
